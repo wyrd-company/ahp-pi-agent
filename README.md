@@ -1,54 +1,59 @@
-# AHP Pi Coding Agent Provider
+# AHP Pi Agent Provider
 
-TypeScript provider adapter that lets an AHP server run the real Pi coding agent SDK.
+TypeScript provider adapter that lets an AHP server run Pi Agent Core.
 
 Package target: `@wyrd-company/ahp-pi-agent`.
 
-This package uses `@earendil-works/pi-coding-agent` and its `createAgentSession(...)` SDK. It does not implement an OpenAI-compatible tool loop itself; Pi owns provider selection, model auth, coding tools, extensions, skills, prompt templates, sessions, and tool execution.
+This package uses `@earendil-works/pi-agent-core`. It does not include the Pi
+Coding Agent tools or session layer; use `@wyrd-company/ahp-pi-coding-agent`
+for that package.
 
 ## Behavior
 
-- Creates one Pi coding-agent SDK session per AHP session.
-- Uses the AHP session working directory as Pi `cwd`.
-- Sends each AHP user turn through `AgentSession.prompt(...)`.
+- Creates one Pi Agent Core `Agent` per AHP session.
+- Sends each AHP user turn through `Agent.prompt(...)`.
 - Maps Pi assistant text deltas to AHP markdown response parts and deltas.
 - Maps Pi `agent_end` to `session/turnComplete`.
-- Maps Pi coding tool execution events to AHP server-side tool call lifecycle actions.
-- Aborts the Pi session when AHP cancels or disposes the session.
+- Maps Pi Agent tool execution events to AHP server-side tool call lifecycle actions.
+- Aborts the Pi Agent run when AHP cancels or disposes the session.
 
 ## Active-Client Tools
 
-The provider maps AHP active-client tools present at session creation into Pi SDK `customTools`.
+The provider maps AHP active-client tools into Pi Agent `AgentTool` definitions.
 
-- Pi executes those custom tools through its normal tool runtime.
-- The custom tool implementation routes execution through `ActiveClientToolRouter.reportInvocation(...)`.
+- Pi executes those tools through its normal tool runtime.
+- The tool implementation routes execution through `ActiveClientToolRouter.reportInvocation(...)`.
 - AHP owns session URI, turn id, tool call id, tool name, and active-client identity.
 - Only the owning active client can complete the tool through normal AHP `session/toolCallComplete`.
-
-Pi coding-agent custom tools are registered when the Pi session is created. The adapter can enable, disable, and route the registered AHP tool set as active-client ownership changes, but newly introduced tool names after Pi session creation require a new AHP session until Pi exposes a public runtime API for adding SDK custom tool definitions.
+- Unlike the Pi Coding Agent SDK adapter, Pi Agent Core tools are updated on `Agent.state.tools`, so active-client tool changes can be reflected after session creation.
 
 ## Usage
 
 ```ts
 import { AhpServer } from '@wyrd-company/ahp-server';
-import { createPiCodingAgentProvider } from '@wyrd-company/ahp-pi-agent';
+import { createPiAgentProvider } from '@wyrd-company/ahp-pi-agent';
 
 const server = new AhpServer({
   providers: [
-    createPiCodingAgentProvider({
-      agentDir: '/workspace/.pi/agent',
+    createPiAgentProvider({
+      modelProvider: 'opencode-go',
+      modelId: process.env.PI_AGENT_MODEL ?? 'deepseek-v4-flash',
+      systemPrompt: 'You are the orchestrator agent.',
+      tools: [mySpecializedTool],
     }),
   ],
 });
 ```
 
-You can pass Pi SDK session options directly:
+You can pass a fully configured Pi model or low-level `AgentOptions` when you
+need direct Pi Agent control:
 
 ```ts
-createPiCodingAgentProvider({
-  agentDir: '/workspace/.pi/agent',
-  noTools: 'builtin',
-  customTools: [mySpecializedTool],
+createPiAgentProvider({
+  model: myPiModel,
+  agentOptions: {
+    toolExecution: 'sequential',
+  },
 });
 ```
 

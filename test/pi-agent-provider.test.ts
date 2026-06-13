@@ -3,15 +3,16 @@ import { after, test } from 'node:test';
 
 import { AhpClient } from '@microsoft/agent-host-protocol/client';
 import type { Message, StateAction, ToolDefinition } from '@microsoft/agent-host-protocol';
+import type { AgentEvent, AgentTool } from '@earendil-works/pi-agent-core';
+import type { Model } from '@earendil-works/pi-ai';
 
 import {
   AhpServer,
   createInMemoryTransportPair,
 } from '@wyrd-company/ahp-server';
 import {
-  createPiCodingAgentProvider,
-  type PiCodingAgentSessionFactoryOptions,
-  type PiCodingAgentSessionLike,
+  createPiAgentProvider,
+  type PiAgentLike,
 } from '../src/index.js';
 
 const runningServers: Array<Promise<void>> = [];
@@ -20,12 +21,16 @@ after(async () => {
   await Promise.allSettled(runningServers);
 });
 
-test('Pi coding agent provider streams real Pi SDK session events as AHP actions', async () => {
-  const pi = new FakePiCodingAgentSession();
+test('Pi Agent provider streams Pi Agent Core events as AHP actions', async () => {
+  const pi = new FakePiAgent();
   const server = new AhpServer({
     providers: [
-      createPiCodingAgentProvider({
-        createAgentSession: async () => ({ session: pi }),
+      createPiAgentProvider({
+        model: fakeModel(),
+        createAgent: ({ agentOptions }) => {
+          pi.state.tools = agentOptions.initialState?.tools ?? [];
+          return pi;
+        },
       }),
     ],
   });
@@ -36,10 +41,10 @@ test('Pi coding agent provider streams real Pi SDK session events as AHP actions
   client.connect();
   await client.initialize({ clientId: 'test-client', protocolVersions: ['0.3.0'] });
 
-  const sessionUri = 'ahp-session:/pi-coding-agent-session';
+  const sessionUri = 'ahp-session:/pi-agent-session';
   await client.request('createSession', {
     channel: sessionUri,
-    provider: 'pi-coding-agent',
+    provider: 'pi-agent',
   });
   const { subscription } = await client.subscribe(sessionUri);
 
@@ -50,9 +55,9 @@ test('Pi coding agent provider streams real Pi SDK session events as AHP actions
   } as StateAction);
 
   await waitFor(() => pi.prompts.length === 1);
-  pi.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'Pi ', contentIndex: 0, partial: assistantMessage() }, message: assistantMessage() });
-  pi.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'says hi', contentIndex: 0, partial: assistantMessage() }, message: assistantMessage() });
-  pi.emit({ type: 'agent_end', messages: [assistantMessage()], willRetry: false });
+  pi.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'Pi ', contentIndex: 0, partial: assistantMessage() }, message: assistantMessage() } as AgentEvent);
+  pi.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'says hi', contentIndex: 0, partial: assistantMessage() }, message: assistantMessage() } as AgentEvent);
+  pi.emit({ type: 'agent_end', messages: [assistantMessage()] } as AgentEvent);
   pi.releasePrompt();
 
   const actions = await collectUntilTerminal(subscription);
@@ -71,12 +76,17 @@ test('Pi coding agent provider streams real Pi SDK session events as AHP actions
   await client.shutdown();
 });
 
-test('Pi coding agent provider maps Pi coding tool events to AHP server-side tool lifecycle', async () => {
-  const pi = new FakePiCodingAgentSession();
+test('Pi Agent provider maps Pi Agent tool events to AHP server-side tool lifecycle', async () => {
+  const pi = new FakePiAgent();
   const server = new AhpServer({
     providers: [
-      createPiCodingAgentProvider({
-        createAgentSession: async () => ({ session: pi }),
+      createPiAgentProvider({
+        model: fakeModel(),
+        tools: [baseTool('read')],
+        createAgent: ({ agentOptions }) => {
+          pi.state.tools = agentOptions.initialState?.tools ?? [];
+          return pi;
+        },
       }),
     ],
   });
@@ -87,10 +97,10 @@ test('Pi coding agent provider maps Pi coding tool events to AHP server-side too
   client.connect();
   await client.initialize({ clientId: 'test-client', protocolVersions: ['0.3.0'] });
 
-  const sessionUri = 'ahp-session:/pi-coding-agent-tools';
+  const sessionUri = 'ahp-session:/pi-agent-tools';
   await client.request('createSession', {
     channel: sessionUri,
-    provider: 'pi-coding-agent',
+    provider: 'pi-agent',
   });
   const { subscription } = await client.subscribe(sessionUri);
 
@@ -101,10 +111,10 @@ test('Pi coding agent provider maps Pi coding tool events to AHP server-side too
   } as StateAction);
 
   await waitFor(() => pi.prompts.length === 1);
-  pi.emit({ type: 'tool_execution_start', toolCallId: 'tool-1', toolName: 'read', args: { path: 'README.md' } });
-  pi.emit({ type: 'tool_execution_update', toolCallId: 'tool-1', toolName: 'read', args: { path: 'README.md' }, partialResult: { content: [{ type: 'text', text: 'partial' }] } });
-  pi.emit({ type: 'tool_execution_end', toolCallId: 'tool-1', toolName: 'read', result: { content: [{ type: 'text', text: 'contents' }] }, isError: false });
-  pi.emit({ type: 'agent_end', messages: [assistantMessage()], willRetry: false });
+  pi.emit({ type: 'tool_execution_start', toolCallId: 'tool-1', toolName: 'read', args: { path: 'README.md' } } as AgentEvent);
+  pi.emit({ type: 'tool_execution_update', toolCallId: 'tool-1', toolName: 'read', args: { path: 'README.md' }, partialResult: { content: [{ type: 'text', text: 'partial' }] } } as AgentEvent);
+  pi.emit({ type: 'tool_execution_end', toolCallId: 'tool-1', toolName: 'read', result: { content: [{ type: 'text', text: 'contents' }] }, isError: false } as AgentEvent);
+  pi.emit({ type: 'agent_end', messages: [assistantMessage()] } as AgentEvent);
   pi.releasePrompt();
 
   const actions = await collectUntilTerminal(subscription);
@@ -127,15 +137,16 @@ test('Pi coding agent provider maps Pi coding tool events to AHP server-side too
   await client.shutdown();
 });
 
-test('Pi coding agent provider registers initial active-client tools as Pi custom tools', async () => {
-  let createdOptions: PiCodingAgentSessionFactoryOptions | undefined;
-  const pi = new FakePiCodingAgentSession();
+test('Pi Agent provider exposes active-client tools through Pi Agent state', async () => {
+  const pi = new FakePiAgent();
   const server = new AhpServer({
     providers: [
-      createPiCodingAgentProvider({
-        createAgentSession: async options => {
-          createdOptions = options;
-          return { session: pi };
+      createPiAgentProvider({
+        model: fakeModel(),
+        tools: [baseTool('base')],
+        createAgent: ({ agentOptions }) => {
+          pi.state.tools = agentOptions.initialState?.tools ?? [];
+          return pi;
         },
       }),
     ],
@@ -151,7 +162,7 @@ test('Pi coding agent provider registers initial active-client tools as Pi custo
   const sessionUri = 'ahp-session:/pi-active-client-tools';
   await client.request('createSession', {
     channel: sessionUri,
-    provider: 'pi-coding-agent',
+    provider: 'pi-agent',
     activeClient: {
       clientId: 'owner-client',
       displayName: 'Owner Client',
@@ -159,24 +170,24 @@ test('Pi coding agent provider registers initial active-client tools as Pi custo
     },
   });
 
-  assert.deepEqual(createdOptions?.customTools?.map(candidate => candidate.name), ['searchWorkspace']);
-  assert.deepEqual(pi.activeToolNames, ['searchWorkspace']);
+  assert.deepEqual(pi.state.tools.map(candidate => candidate.name), ['base', 'searchWorkspace']);
 
   client.dispatch(sessionUri, {
     type: 'session/activeClientChanged',
     activeClient: null,
   } as StateAction);
-  await waitFor(() => pi.activeToolNames.length === 0);
+  await waitFor(() => pi.state.tools.map(candidate => candidate.name).join(',') === 'base');
 
   await client.request('disposeSession', { channel: sessionUri });
   await client.shutdown();
 });
 
-class FakePiCodingAgentSession implements PiCodingAgentSessionLike {
+class FakePiAgent implements PiAgentLike {
   readonly prompts: string[] = [];
-  activeToolNames: string[] = [];
-  private readonly listeners = new Set<(event: Parameters<PiCodingAgentSessionLike['subscribe']>[0] extends (event: infer T) => void ? T : never) => void>();
+  readonly state: { tools: AgentTool[] } = { tools: [] };
+  private readonly listeners = new Set<(event: AgentEvent, signal: AbortSignal) => Promise<void> | void>();
   private release: (() => void) | undefined;
+  private readonly abortController = new AbortController();
 
   async prompt(text: string): Promise<void> {
     this.prompts.push(text);
@@ -185,14 +196,14 @@ class FakePiCodingAgentSession implements PiCodingAgentSessionLike {
     });
   }
 
-  subscribe(listener: (event: Parameters<PiCodingAgentSessionLike['subscribe']>[0] extends (event: infer T) => void ? T : never) => void): () => void {
+  subscribe(listener: (event: AgentEvent, signal: AbortSignal) => Promise<void> | void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
 
-  emit(event: Parameters<PiCodingAgentSessionLike['subscribe']>[0] extends (event: infer T) => void ? T : never): void {
+  emit(event: AgentEvent): void {
     for (const listener of this.listeners) {
-      listener(event);
+      void listener(event, this.abortController.signal);
     }
   }
 
@@ -202,15 +213,8 @@ class FakePiCodingAgentSession implements PiCodingAgentSessionLike {
   }
 
   abort(): void {
+    this.abortController.abort();
     this.releasePrompt();
-  }
-
-  getActiveToolNames(): string[] {
-    return this.activeToolNames;
-  }
-
-  setActiveToolsByName(toolNames: string[]): void {
-    this.activeToolNames = toolNames;
   }
 }
 
@@ -270,6 +274,41 @@ function toolDefinition(name: string, title: string): ToolDefinition {
       },
       required: ['query'],
     },
+  };
+}
+
+function baseTool(name: string): AgentTool {
+  return {
+    name,
+    label: name,
+    description: `${name} base tool`,
+    parameters: { type: 'object' } as never,
+    async execute() {
+      return {
+        content: [{ type: 'text', text: `${name} executed` }],
+        details: undefined,
+      };
+    },
+  };
+}
+
+function fakeModel(): Model<any> {
+  return {
+    id: 'fake-model',
+    name: 'Fake Model',
+    api: 'opencode-go',
+    provider: 'opencode-go',
+    baseUrl: '',
+    reasoning: false,
+    input: ['text'],
+    cost: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+    },
+    contextWindow: 128_000,
+    maxTokens: 4_096,
   };
 }
 
