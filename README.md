@@ -32,7 +32,9 @@ The provider maps AHP active-client tools into Pi Agent `AgentTool` definitions.
 The provider implements `ResumableAgentProvider`. When `ahp-server` reloads a
 persisted AHP session, the adapter recreates the Pi Agent Core `Agent` using the
 stored AHP working directory, model/config context, active-client tools, and the
-same AHP session URI as Pi `sessionId`.
+provider-owned Pi `sessionId` previously returned by `AgentSession.getResumeState()`.
+For new sessions, the adapter seeds Pi `sessionId` from the AHP session URI unless
+you provide an explicit `AgentOptions.sessionId`.
 
 Any deeper memory or transcript continuity comes from the Pi Agent configuration
 you provide, such as durable model/session state in `AgentOptions`.

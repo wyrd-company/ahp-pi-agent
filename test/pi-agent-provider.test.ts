@@ -215,6 +215,12 @@ test('Pi Agent provider resumes a persisted AHP session with the same Pi session
     });
     await firstClient.shutdown();
 
+    const store = new FileSystemSessionStore({ directory });
+    assert.deepEqual(store.getSession(sessionUri)?.providerResumeState, { sessionId: sessionUri });
+    store.updateSession(sessionUri, session => {
+      session.providerResumeState = { sessionId: 'pi-native-session-1' };
+    });
+
     const secondServer = new AhpServer({
       providers: [
         createPiAgentProvider({
@@ -226,7 +232,7 @@ test('Pi Agent provider resumes a persisted AHP session with the same Pi session
           },
         }),
       ],
-      store: new FileSystemSessionStore({ directory }),
+      store,
     });
     const secondClient = createClient(secondServer);
     secondClient.connect();
@@ -237,7 +243,7 @@ test('Pi Agent provider resumes a persisted AHP session with the same Pi session
       subscriptions: [sessionUri],
     });
     assert.equal(reconnect.type, 'snapshot');
-    assert.equal(resumedSessionId, sessionUri);
+    assert.equal(resumedSessionId, 'pi-native-session-1');
 
     const subscription = secondClient.attachSubscription(sessionUri);
     secondClient.dispatch(sessionUri, {

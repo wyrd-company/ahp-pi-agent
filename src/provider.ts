@@ -25,6 +25,7 @@ import type {
   AgentSession,
   AgentSessionContext,
   AgentTurnSink,
+  ProviderResumeState,
   ResumableAgentProvider,
   ResumableAgentSessionContext,
 } from '@wyrd-company/ahp-provider-kit';
@@ -36,6 +37,7 @@ import {
 } from '@wyrd-company/ahp-provider-kit';
 
 export interface PiAgentLike {
+  readonly sessionId?: string;
   readonly state: {
     tools: AgentTool[];
   };
@@ -46,7 +48,7 @@ export interface PiAgentLike {
 }
 
 export interface PiAgentFactoryOptions {
-  readonly context: AgentSessionContext;
+  readonly context: AgentSessionContext | ResumableAgentSessionContext;
   readonly agentOptions: AgentOptions;
   readonly activeClientTools?: ActiveClientTools;
 }
@@ -68,7 +70,7 @@ export interface PiAgentProviderOptions extends PiAgentCreateSessionOptions {
   readonly description?: string;
   readonly createAgent?: PiAgentFactory;
   readonly createSessionOptions?: (
-    context: AgentSessionContext,
+    context: AgentSessionContext | ResumableAgentSessionContext,
   ) => PiAgentCreateSessionOptions | Promise<PiAgentCreateSessionOptions>;
 }
 
@@ -83,8 +85,9 @@ export function createPiAgentProvider(options: PiAgentProviderOptions = {}): Res
     defaultModel: modelId,
   });
 
-  async function createRuntimeSession(context: AgentSessionContext): Promise<AgentSession> {
+  async function createRuntimeSession(context: AgentSessionContext | ResumableAgentSessionContext): Promise<AgentSession> {
     const sessionOptions = await options.createSessionOptions?.(context) ?? {};
+    const resumeState = resumeStateFromContext(context);
     const activeClientTools = new ActiveClientToolRouter({
       activeClientTools: context.activeClientTools,
       sink: context.activeClientToolSink,
@@ -103,6 +106,7 @@ export function createPiAgentProvider(options: PiAgentProviderOptions = {}): Res
       turnState,
       modelProvider,
       modelId,
+      resumeState,
     });
     const createAgent = options.createAgent ?? defaultPiAgentFactory;
     const piAgent = await createAgent({
@@ -110,7 +114,7 @@ export function createPiAgentProvider(options: PiAgentProviderOptions = {}): Res
       agentOptions,
       activeClientTools: context.activeClientTools,
     });
-    return new PiAhpAgentSession(piAgent, baseTools, activeClientTools, turnState);
+    return new PiAhpAgentSession(piAgent, agentOptions.sessionId, baseTools, activeClientTools, turnState);
   }
 
   return {
@@ -124,9 +128,14 @@ export function createPiAgentProvider(options: PiAgentProviderOptions = {}): Res
   };
 }
 
+interface PiAgentResumeState extends ProviderResumeState {
+  readonly sessionId?: string;
+}
+
 class PiAhpAgentSession implements AgentSession {
   constructor(
     private readonly piAgent: PiAgentLike,
+    private readonly configuredSessionId: string | undefined,
     private readonly baseTools: readonly AgentTool[],
     private readonly activeClientTools: ActiveClientToolRouter,
     private readonly turnState: PiAgentTurnState,
@@ -179,6 +188,11 @@ class PiAhpAgentSession implements AgentSession {
       ...this.baseTools,
       ...toPiActiveClientTools(activeClientTools?.tools ?? [], this.activeClientTools, this.turnState),
     ];
+  }
+
+  getResumeState(): PiAgentResumeState | undefined {
+    const sessionId = this.piAgent.sessionId ?? this.configuredSessionId;
+    return sessionId ? { sessionId } : undefined;
   }
 
   async cancel(): Promise<void> {
@@ -276,6 +290,7 @@ interface CreateAgentOptionsInput {
   readonly turnState: PiAgentTurnState;
   readonly modelProvider: string;
   readonly modelId: string;
+  readonly resumeState: PiAgentResumeState;
 }
 
 function createAgentOptions(input: CreateAgentOptionsInput): AgentOptions {
@@ -284,7 +299,7 @@ function createAgentOptions(input: CreateAgentOptionsInput): AgentOptions {
   return {
     ...baseAgentOptions,
     ...sessionAgentOptions,
-    sessionId: sessionAgentOptions.sessionId ?? baseAgentOptions.sessionId ?? input.context.sessionUri,
+    sessionId: input.resumeState.sessionId ?? sessionAgentOptions.sessionId ?? baseAgentOptions.sessionId ?? input.context.sessionUri,
     initialState: {
       ...baseAgentOptions.initialState,
       ...sessionAgentOptions.initialState,
@@ -303,6 +318,15 @@ function createAgentOptions(input: CreateAgentOptionsInput): AgentOptions {
       ],
     },
   };
+}
+
+function resumeStateFromContext(context: AgentSessionContext | ResumableAgentSessionContext): PiAgentResumeState {
+  if (!('resumeState' in context) || !context.resumeState) {
+    return {};
+  }
+  return typeof context.resumeState.sessionId === 'string'
+    ? { sessionId: context.resumeState.sessionId }
+    : {};
 }
 
 function toPiActiveClientTools(
