@@ -27,6 +27,16 @@ The provider maps AHP active-client tools into Pi Agent `AgentTool` definitions.
 - Only the owning active client can complete the tool through normal AHP `session/toolCallComplete`.
 - Unlike the Pi Coding Agent SDK adapter, Pi Agent Core tools are updated on `Agent.state.tools`, so active-client tool changes can be reflected after session creation.
 
+## Session Resume
+
+The provider implements `ResumableAgentProvider`. When `ahp-server` reloads a
+persisted AHP session, the adapter recreates the Pi Agent Core `Agent` using the
+stored AHP working directory, model/config context, active-client tools, and the
+same AHP session URI as Pi `sessionId`.
+
+Any deeper memory or transcript continuity comes from the Pi Agent configuration
+you provide, such as durable model/session state in `AgentOptions`.
+
 ## Usage
 
 ```ts

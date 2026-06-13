@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { after, test } from 'node:test';
 
 import { AhpClient } from '@microsoft/agent-host-protocol/client';
@@ -8,6 +11,7 @@ import type { Model } from '@earendil-works/pi-ai';
 
 import {
   AhpServer,
+  FileSystemSessionStore,
   createInMemoryTransportPair,
 } from '@wyrd-company/ahp-server';
 import {
@@ -182,6 +186,81 @@ test('Pi Agent provider exposes active-client tools through Pi Agent state', asy
   await client.shutdown();
 });
 
+test('Pi Agent provider resumes a persisted AHP session with the same Pi session id', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'ahp-pi-agent-resume-'));
+  const firstPi = new FakePiAgent();
+  const secondPi = new FakePiAgent();
+  const sessionUri = 'ahp-session:/pi-agent-resume';
+  let resumedSessionId: string | undefined;
+
+  try {
+    const firstServer = new AhpServer({
+      providers: [
+        createPiAgentProvider({
+          model: fakeModel(),
+          createAgent: ({ agentOptions }) => {
+            firstPi.state.tools = agentOptions.initialState?.tools ?? [];
+            return firstPi;
+          },
+        }),
+      ],
+      store: new FileSystemSessionStore({ directory }),
+    });
+    const firstClient = createClient(firstServer);
+    firstClient.connect();
+    await firstClient.initialize({ clientId: 'pi-client', protocolVersions: ['0.3.0'] });
+    await firstClient.request('createSession', {
+      channel: sessionUri,
+      provider: 'pi-agent',
+    });
+    await firstClient.shutdown();
+
+    const secondServer = new AhpServer({
+      providers: [
+        createPiAgentProvider({
+          model: fakeModel(),
+          createAgent: ({ agentOptions }) => {
+            resumedSessionId = agentOptions.sessionId;
+            secondPi.state.tools = agentOptions.initialState?.tools ?? [];
+            return secondPi;
+          },
+        }),
+      ],
+      store: new FileSystemSessionStore({ directory }),
+    });
+    const secondClient = createClient(secondServer);
+    secondClient.connect();
+
+    const reconnect = await secondClient.reconnect({
+      clientId: 'pi-client',
+      lastSeenServerSeq: 0,
+      subscriptions: [sessionUri],
+    });
+    assert.equal(reconnect.type, 'snapshot');
+    assert.equal(resumedSessionId, sessionUri);
+
+    const subscription = secondClient.attachSubscription(sessionUri);
+    secondClient.dispatch(sessionUri, {
+      type: 'session/turnStarted',
+      turnId: 'resume-turn',
+      message: userMessage('Continue after reconnect'),
+    } as StateAction);
+
+    await waitFor(() => secondPi.prompts.length === 1);
+    secondPi.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'Resumed Pi', contentIndex: 0, partial: assistantMessage() }, message: assistantMessage() } as AgentEvent);
+    secondPi.emit({ type: 'agent_end', messages: [assistantMessage()] } as AgentEvent);
+    secondPi.releasePrompt();
+
+    const actions = await collectUntilTerminal(subscription);
+    assert.deepEqual(secondPi.prompts, ['Continue after reconnect']);
+    assert.equal(actions.at(-1)?.type, 'session/turnComplete');
+
+    await secondClient.shutdown();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 class FakePiAgent implements PiAgentLike {
   readonly prompts: string[] = [];
   readonly state: { tools: AgentTool[] } = { tools: [] };
@@ -216,6 +295,12 @@ class FakePiAgent implements PiAgentLike {
     this.abortController.abort();
     this.releasePrompt();
   }
+}
+
+function createClient(server: AhpServer): AhpClient {
+  const [clientTransport, serverTransport] = createInMemoryTransportPair();
+  runningServers.push(server.accept(serverTransport));
+  return new AhpClient(clientTransport, { requestTimeoutMs: 1_000 });
 }
 
 async function collectUntilTerminal(subscription: AsyncIterator<unknown>): Promise<StateAction[]> {

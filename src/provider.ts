@@ -25,6 +25,8 @@ import type {
   AgentSession,
   AgentSessionContext,
   AgentTurnSink,
+  ResumableAgentProvider,
+  ResumableAgentSessionContext,
 } from '@wyrd-company/ahp-provider-kit';
 import {
   ActiveClientToolRouter,
@@ -70,7 +72,7 @@ export interface PiAgentProviderOptions extends PiAgentCreateSessionOptions {
   ) => PiAgentCreateSessionOptions | Promise<PiAgentCreateSessionOptions>;
 }
 
-export function createPiAgentProvider(options: PiAgentProviderOptions = {}): AgentProvider {
+export function createPiAgentProvider(options: PiAgentProviderOptions = {}): ResumableAgentProvider {
   const providerId = options.providerId ?? 'pi-agent';
   const modelProvider = options.modelProvider ?? process.env.PI_AGENT_PROVIDER ?? 'opencode-go';
   const modelId = options.modelId ?? process.env.PI_AGENT_MODEL ?? 'deepseek-v4-flash';
@@ -81,36 +83,43 @@ export function createPiAgentProvider(options: PiAgentProviderOptions = {}): Age
     defaultModel: modelId,
   });
 
+  async function createRuntimeSession(context: AgentSessionContext): Promise<AgentSession> {
+    const sessionOptions = await options.createSessionOptions?.(context) ?? {};
+    const activeClientTools = new ActiveClientToolRouter({
+      activeClientTools: context.activeClientTools,
+      sink: context.activeClientToolSink,
+    });
+    const turnState: PiAgentTurnState = {};
+    const baseTools = [
+      ...(options.tools ?? []),
+      ...(sessionOptions.tools ?? []),
+    ];
+    const agentOptions = createAgentOptions({
+      baseOptions: options,
+      sessionOptions,
+      context,
+      baseTools,
+      activeClientTools,
+      turnState,
+      modelProvider,
+      modelId,
+    });
+    const createAgent = options.createAgent ?? defaultPiAgentFactory;
+    const piAgent = await createAgent({
+      context,
+      agentOptions,
+      activeClientTools: context.activeClientTools,
+    });
+    return new PiAhpAgentSession(piAgent, baseTools, activeClientTools, turnState);
+  }
+
   return {
     agent,
-    async createSession(context: AgentSessionContext): Promise<AgentSession> {
-      const sessionOptions = await options.createSessionOptions?.(context) ?? {};
-      const activeClientTools = new ActiveClientToolRouter({
-        activeClientTools: context.activeClientTools,
-        sink: context.activeClientToolSink,
-      });
-      const turnState: PiAgentTurnState = {};
-      const baseTools = [
-        ...(options.tools ?? []),
-        ...(sessionOptions.tools ?? []),
-      ];
-      const agentOptions = createAgentOptions({
-        baseOptions: options,
-        sessionOptions,
-        context,
-        baseTools,
-        activeClientTools,
-        turnState,
-        modelProvider,
-        modelId,
-      });
-      const createAgent = options.createAgent ?? defaultPiAgentFactory;
-      const piAgent = await createAgent({
-        context,
-        agentOptions,
-        activeClientTools: context.activeClientTools,
-      });
-      return new PiAhpAgentSession(piAgent, baseTools, activeClientTools, turnState);
+    createSession(context: AgentSessionContext): Promise<AgentSession> {
+      return createRuntimeSession(context);
+    },
+    resumeSession(context: ResumableAgentSessionContext): Promise<AgentSession> {
+      return createRuntimeSession(context);
     },
   };
 }
