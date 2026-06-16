@@ -141,6 +141,88 @@ test('Pi Agent provider maps Pi Agent tool events to AHP server-side tool lifecy
   await client.shutdown();
 });
 
+test('Pi Agent provider emits assistant usage before completed turns', async () => {
+  const pi = new FakePiAgent();
+  const server = new AhpServer({
+    providers: [
+      createPiAgentProvider({
+        model: fakeModel(),
+        createAgent: ({ agentOptions }) => {
+          pi.state.tools = agentOptions.initialState?.tools ?? [];
+          return pi;
+        },
+      }),
+    ],
+  });
+  const client = createClient(server);
+  client.connect();
+  await client.initialize({ clientId: 'usage-client', protocolVersions: ['0.3.0'] });
+
+  const sessionUri = 'ahp-session:/pi-agent-usage';
+  await client.request('createSession', {
+    channel: sessionUri,
+    provider: 'pi-agent',
+  });
+  const { subscription } = await client.subscribe(sessionUri);
+
+  client.dispatch(sessionUri, {
+    type: 'session/turnStarted',
+    turnId: 'usage-turn',
+    message: userMessage('Report usage'),
+  } as StateAction);
+
+  await waitFor(() => pi.prompts.length === 1);
+  const message = assistantMessage({
+    input: 42_000,
+    output: 3_000,
+    cacheRead: 10_000,
+    cacheWrite: 1_000,
+    totalTokens: 45_000,
+  });
+  pi.emit({ type: 'message_end', message } as AgentEvent);
+  pi.emit({ type: 'agent_end', messages: [message] } as AgentEvent);
+  pi.releasePrompt();
+
+  const actions = await collectUntilTerminal(subscription);
+  const usageIndex = actions.findIndex(action => action.type === 'session/usage');
+  const completeIndex = actions.findIndex(action => action.type === 'session/turnComplete');
+  assert.notEqual(usageIndex, -1);
+  assert.notEqual(completeIndex, -1);
+  assert.ok(usageIndex < completeIndex);
+  assert.deepEqual((actions[usageIndex] as { usage?: unknown }).usage, {
+    inputTokens: 42_000,
+    outputTokens: 3_000,
+    model: 'fake',
+    cacheReadTokens: 10_000,
+    _meta: {
+      wyrdContextUsage: {
+        totalTokens: 45_000,
+        maxContextWindow: 128_000,
+        usageRatio: 45_000 / 128_000,
+        confidence: 'measured',
+        source: 'provider-api',
+      },
+      piAgentUsage: {
+        input: 42_000,
+        output: 3_000,
+        cacheRead: 10_000,
+        cacheWrite: 1_000,
+        totalTokens: 45_000,
+        cost: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: 0,
+        },
+      },
+    },
+  });
+
+  await client.request('disposeSession', { channel: sessionUri });
+  await client.shutdown();
+});
+
 test('Pi Agent provider exposes active-client tools through Pi Agent state', async () => {
   const pi = new FakePiAgent();
   const server = new AhpServer({
@@ -333,7 +415,13 @@ async function collectUntilTerminal(subscription: AsyncIterator<unknown>): Promi
   return actions;
 }
 
-function assistantMessage(): never {
+function assistantMessage(usage?: {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  totalTokens: number;
+}): never {
   return {
     role: 'assistant',
     content: [{ type: 'text', text: '' }],
@@ -341,7 +429,20 @@ function assistantMessage(): never {
     model: 'fake',
     api: 'fake',
     stopReason: 'stop',
-    usage: {},
+    usage: {
+      input: usage?.input ?? 0,
+      output: usage?.output ?? 0,
+      cacheRead: usage?.cacheRead ?? 0,
+      cacheWrite: usage?.cacheWrite ?? 0,
+      totalTokens: usage?.totalTokens ?? 0,
+      cost: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        total: 0,
+      },
+    },
     timestamp: Date.now(),
   } as never;
 }

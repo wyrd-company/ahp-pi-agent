@@ -5,6 +5,7 @@ import type {
   ToolCallResult,
   ToolDefinition as AhpToolDefinition,
   ToolResultContent,
+  UsageInfo,
 } from '@microsoft/agent-host-protocol';
 import {
   Agent,
@@ -14,8 +15,10 @@ import {
 } from '@earendil-works/pi-agent-core';
 import {
   getModel,
+  type AssistantMessage,
   type KnownProvider,
   type Model,
+  type Usage,
 } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
 
@@ -114,7 +117,7 @@ export function createPiAgentProvider(options: PiAgentProviderOptions = {}): Res
       agentOptions,
       activeClientTools: context.activeClientTools,
     });
-    return new PiAhpAgentSession(piAgent, agentOptions.sessionId, baseTools, activeClientTools, turnState);
+    return new PiAhpAgentSession(piAgent, agentOptions.sessionId, agentOptions.initialState?.model, baseTools, activeClientTools, turnState);
   }
 
   return {
@@ -136,6 +139,7 @@ class PiAhpAgentSession implements AgentSession {
   constructor(
     private readonly piAgent: PiAgentLike,
     private readonly configuredSessionId: string | undefined,
+    private readonly model: Model<any> | undefined,
     private readonly baseTools: readonly AgentTool[],
     private readonly activeClientTools: ActiveClientToolRouter,
     private readonly turnState: PiAgentTurnState,
@@ -161,8 +165,7 @@ class PiAhpAgentSession implements AgentSession {
       this.turnState.turnId = ahpTurnId;
       await this.piAgent.prompt(message.text);
       if (!activeTurn.completed && !signal.aborted) {
-        activeTurn.markdown.complete();
-        activeTurn.completed = true;
+        this.completeTurn(activeTurn);
       }
     } catch (error) {
       sink.emit({
@@ -207,7 +210,7 @@ class PiAhpAgentSession implements AgentSession {
 
   private handlePiEvent(
     event: AgentEvent,
-    activeTurn: { turnId: string; markdown: MarkdownTurnEmitter; sink: AgentTurnSink; completed: boolean },
+    activeTurn: ActivePiTurn,
   ): void {
     if (event.type === 'message_update' && event.assistantMessageEvent.type === 'text_delta') {
       activeTurn.markdown.emitDelta(event.assistantMessageEvent.delta);
@@ -259,6 +262,7 @@ class PiAhpAgentSession implements AgentSession {
       return;
     }
     if (event.type === 'message_end' && event.message.role === 'assistant' && event.message.stopReason === 'error') {
+      activeTurn.usage = usageInfo(event.message, this.model);
       activeTurn.sink.emit({
         type: 'session/error',
         turnId: activeTurn.turnId,
@@ -270,15 +274,37 @@ class PiAhpAgentSession implements AgentSession {
       activeTurn.completed = true;
       return;
     }
+    if (event.type === 'message_end' && event.message.role === 'assistant') {
+      activeTurn.usage = usageInfo(event.message, this.model);
+      return;
+    }
+    if (event.type === 'turn_end' && event.message.role === 'assistant') {
+      activeTurn.usage = usageInfo(event.message, this.model);
+      return;
+    }
     if (event.type === 'agent_end' && !activeTurn.completed) {
-      activeTurn.markdown.complete();
-      activeTurn.completed = true;
+      activeTurn.usage ??= latestAssistantUsage(event.messages, this.model);
+      this.completeTurn(activeTurn);
     }
   }
 
   private isActiveClientTool(toolName: string): boolean {
     return Boolean(this.activeClientTools.tools?.some(tool => tool.name === toolName));
   }
+
+  private completeTurn(activeTurn: ActivePiTurn): void {
+    activeTurn.sink.emit(usageAction(activeTurn.turnId, activeTurn.usage ?? unavailableUsageInfo(this.model)));
+    activeTurn.markdown.complete();
+    activeTurn.completed = true;
+  }
+}
+
+interface ActivePiTurn {
+  readonly turnId: string;
+  readonly markdown: MarkdownTurnEmitter;
+  readonly sink: AgentTurnSink;
+  completed: boolean;
+  usage?: UsageInfo;
 }
 
 interface CreateAgentOptionsInput {
@@ -359,6 +385,80 @@ function toPiActiveClientTools(
 
 interface PiAgentTurnState {
   turnId?: string;
+}
+
+function usageAction(turnId: string, usage: UsageInfo): StateAction {
+  return {
+    type: 'session/usage',
+    turnId,
+    usage,
+  } as StateAction;
+}
+
+function latestAssistantUsage(messages: readonly unknown[], model: Model<any> | undefined): UsageInfo | undefined {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (isAssistantMessage(message)) {
+      return usageInfo(message, model);
+    }
+  }
+  return undefined;
+}
+
+function usageInfo(message: AssistantMessage, model: Model<any> | undefined): UsageInfo {
+  const usage = message.usage;
+  const maxContextWindow = finiteNumber(model?.contextWindow);
+  const totalTokens = finiteNumber(usage.totalTokens);
+  const usageRatio = totalTokens !== undefined && maxContextWindow
+    ? totalTokens / maxContextWindow
+    : undefined;
+
+  return {
+    inputTokens: finiteNumber(usage.input),
+    outputTokens: finiteNumber(usage.output),
+    model: message.responseModel ?? message.model,
+    cacheReadTokens: finiteNumber(usage.cacheRead),
+    _meta: {
+      wyrdContextUsage: {
+        ...(totalTokens !== undefined ? { totalTokens } : {}),
+        ...(maxContextWindow !== undefined ? { maxContextWindow } : {}),
+        ...(usageRatio !== undefined ? { usageRatio } : {}),
+        confidence: 'measured',
+        source: 'provider-api',
+      },
+      piAgentUsage: usage,
+    },
+  };
+}
+
+function unavailableUsageInfo(model: Model<any> | undefined): UsageInfo {
+  return {
+    ...(model?.id ? { model: model.id } : {}),
+    _meta: {
+      wyrdContextUsage: {
+        ...(finiteNumber(model?.contextWindow) !== undefined ? { maxContextWindow: finiteNumber(model?.contextWindow) } : {}),
+        confidence: 'unavailable',
+        source: 'unavailable',
+        reason: 'Pi Agent Core did not emit assistant message usage for this turn',
+      },
+    },
+  };
+}
+
+function isAssistantMessage(value: unknown): value is AssistantMessage {
+  return isRecord(value) && value.role === 'assistant' && isUsage(value.usage);
+}
+
+function isUsage(value: unknown): value is Usage {
+  return isRecord(value) &&
+    typeof value.input === 'number' &&
+    typeof value.output === 'number' &&
+    typeof value.cacheRead === 'number' &&
+    typeof value.totalTokens === 'number';
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
 function ahpToolResultToPiContent(result: ToolCallResult): Array<{ type: 'text'; text: string }> {
