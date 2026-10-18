@@ -33,7 +33,7 @@
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "^0.79.3",
-    "@earendil-works/pi-ai": "^0.79.3",
+    "@earendil-works/pi-ai": "^0.99.0",
     "@microsoft/agent-host-protocol": "^0.3.0",
     "@wyrd-company/ahp-provider-kit": "^0.3.0",
     "typebox": "^1.1.38"
